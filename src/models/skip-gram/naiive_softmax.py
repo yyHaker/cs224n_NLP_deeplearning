@@ -1,4 +1,18 @@
 # -*- coding:utf-8 -*-
+"""
+a toy realization of word2vec
+1. statistics of training word pairs and cut off stopwords
+2. batch training
+3. one-hidden layer and a softmax classifier
+4. negative log-likelihood
+
+reference:
+[1]Word2Vec Tutorial - The Skip-Gram Model:
+http://mccormickml.com/2016/04/19/word2vec-tutorial-the-skip-gram-model/
+[2]Skip-gram with naiive softmax: https://nbviewer.jupyter.org/github/DSKSD/
+DeepNLP-models-Pytorch/blob/master/notebooks/01.Skip-gram-Naive-
+Softmax.ipynb
+"""
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
@@ -15,7 +29,7 @@ random.seed(1024)
 
 USE_CUDA = torch.cuda.is_available()
 gpus = [0]
-torch.cuda.set_device(gpus[0])
+# torch.cuda.set_device(gpus[0])
 
 FloatTensor = torch.cuda.FloatTensor if USE_CUDA else torch.FloatTensor
 LongTensor = torch.cuda.LongTensor if USE_CUDA else torch.LongTensor
@@ -40,7 +54,7 @@ def getBatch(batch_size, train_data):
 def prepare_sequence(seq, word2index):
     """get the word index of the sequence"""
     idxs = list(map(lambda w: word2index[w] if word2index[w] is not None else word2index["<UNK>"], seq))
-    return Variable(LongTensor)
+    return Variable(LongTensor(idxs))
 
 
 def prepare_word(word, word2index):
@@ -89,7 +103,7 @@ for window in windows:
         if i == WINDOW_SIZE or window[i] == '<DUMMY>':
             continue
         train_data.append((window[WINDOW_SIZE], window[i]))
-print("the train_data is:", train_data[: WINDOW_SIZE * 2])
+print("the sample train_data is:", train_data[: WINDOW_SIZE * 2])
 
 X_p = []
 Y_p = []
@@ -99,5 +113,101 @@ for tr in train_data:
 
 train_data = list(zip(X_p, Y_p))
 print("the data size is :", len(train_data))   # 7606
+
+
+# the skip-gram model
+class Skipgram(nn.Module):
+    def __init__(self, vocab_size, projection_dim):
+        super(Skipgram, self).__init__()
+        self.embedding_v = nn.Embedding(vocab_size, projection_dim)  # 即Word Embeddings
+        self.embedding_u = nn.Embedding(vocab_size, projection_dim)
+
+        self.embedding_v.weight.data.uniform_(-1, 1)  # init
+        self.embedding_u.weight.data.uniform_(0, 0)  # init
+        # self.out = nn.Linear(projection_dim,vocab_size)
+
+    def forward(self, center_words, target_words, outer_words):
+        """
+        :param center_words: the center word, batch
+        :param target_words: the target word, batch
+        :param outer_words:
+        :return:
+        """
+        center_embeds = self.embedding_v(center_words)  # B x 1 x D
+        target_embeds = self.embedding_u(target_words)  # B x 1 x D
+        outer_embeds = self.embedding_u(outer_words)  # B x V x D
+
+        # Performs a batch matrix-matrix product of matrices
+        scores = target_embeds.bmm(center_embeds.transpose(1, 2)).squeeze(2)  # Bx1xD * BxDx1 => Bx1
+        norm_scores = outer_embeds.bmm(center_embeds.transpose(1, 2)).squeeze(2)  # BxVxD * BxDx1 => BxV
+
+        nll = -torch.mean(
+            torch.log(torch.exp(scores) / torch.sum(torch.exp(norm_scores), 1).unsqueeze(1)))  # log-softmax
+
+        return nll  # negative log likelihood
+
+    def prediction(self, inputs):
+        embeds = self.embedding_v(inputs)
+
+        return embeds
+
+
+EMBEDDING_SIZE = 100
+BATCH_SIZE = 256
+EPOCH = 100
+
+losses = []
+model = Skipgram(len(word2index), EMBEDDING_SIZE)
+if USE_CUDA:
+    model = model.cuda()
+optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+for epoch in range(EPOCH):
+    for i, batch in enumerate(getBatch(BATCH_SIZE, train_data)):
+        inputs, targets = zip(*batch)
+
+        inputs = torch.cat(inputs)  # Bx1
+        targets = torch.cat(targets)  # Bx1
+        vocabs = prepare_sequence(list(vocab), word2index).expand(inputs.size(0), len(vocab))  # B x V
+
+        model.zero_grad()  # Sets gradients of all model parameters to zero.
+        loss = model(inputs, targets, vocabs)
+
+        loss.backward()   # backpropagation
+        optimizer.step()  # Performs a single optimization step
+
+        losses.append(loss.data.tolist()[0])
+
+    if epoch % 10 == 0:
+        print("Epoch:  %d, mean loss : %.02f" % (epoch, np.mean(losses)))
+        losses = []
+
+
+def word_similarity(target, vocab):
+    """
+    :param target: the target word
+    :param vocab: the vocabulary
+    :return:
+    """
+    target_v = model.prediction(prepare_word(target, word2index))
+    similarities = []
+    for i in range(len(vocab)):
+        if vocab[i] == target:
+            continue
+        vector = model.prediction(prepare_word(list(vocab)[i], word2index))
+        cosine_sim = F.cosine_similarity(target_v, vector).data.tolist()[0]
+        similarities.append([vocab[i], cosine_sim])
+    return sorted(similarities, key=lambda x: x[1], reverse=True)[:10]  # sort by similarity
+
+
+# test the word similarity
+for i in range(5):
+    test = random.choice(list(vocab))
+    print("test the similarity of word ", test)
+    print("-"*50)
+    print(word_similarity(test, vocab))
+    print("-"*50)
+
+
 
 
